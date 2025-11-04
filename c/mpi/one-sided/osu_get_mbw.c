@@ -1,4 +1,4 @@
-#define BENCHMARK "OSU MPI_Get%s Bandwidth Test"
+#define BENCHMARK "OSU MPI_Get Multiple Bandwidth%s Bandwidth Test"
 /*
  * Copyright (c) 2003-2023 the Network-Based Computing Laboratory
  * (NBCL), The Ohio State University.
@@ -45,8 +45,7 @@ int main(int argc, char *argv[])
     MPI_Datatype mpi_type_list[OMB_NUM_DATATYPES];
 
     set_header(HEADER);
-    set_benchmark_name("osu_get_bw");
-
+    set_benchmark_name("osu_get_mbw");
     po_ret = process_options(argc, argv);
     omb_populate_mpi_type_list(mpi_type_list);
     if (options.validate) {
@@ -88,7 +87,7 @@ int main(int argc, char *argv[])
             case PO_BAD_USAGE:
                 print_bad_usage_message(rank);
             case PO_HELP_MESSAGE:
-                usage_one_sided("osu_get_bw");
+                usage_one_sided("osu_get_mbw");
                 break;
             case PO_VERSION_MESSAGE:
                 print_version_message(rank);
@@ -113,9 +112,9 @@ int main(int argc, char *argv[])
             break;
     }
 
-    if (nprocs != 2) {
+    if (nprocs < 2) {
         if (rank == 0) {
-            fprintf(stderr, "This test requires exactly two processes\n");
+            fprintf(stderr, "This test requires two or more processes\n");
         }
 
         omb_mpi_finalize(omb_init_h);
@@ -124,19 +123,7 @@ int main(int argc, char *argv[])
     }
 
     print_header_one_sided(rank, options.win, options.sync, MPI_CHAR);
-
-    // 设置默认pairs数量
     options.pairs = nprocs / 2;
-    
-    // 验证pairs参数
-    if (options.pairs > (nprocs / 2)) {
-        if (rank == 0) {
-            fprintf(stderr, "Invalid pairs parameter: %d\n", options.pairs);
-            fprintf(stderr, "pairs must be less than or equal to (np / 2)\n");
-        }
-        omb_mpi_finalize(omb_init_h);
-        exit(EXIT_FAILURE);
-    }
 
     switch (options.sync) {
         case LOCK:
@@ -172,13 +159,18 @@ int main(int argc, char *argv[])
 
     return EXIT_SUCCESS;
 }
-
 void print_bw(int rank, int size, double t, struct omb_stat_t omb_stat)
 {
     if (rank == 0) {
-        double tmp = size / 1e6 * options.iterations * options.window_size;
-        fprintf(stdout, "%-*d%*.*f", 10, size, FIELD_WIDTH, FLOAT_PRECISION,
-                tmp / t);
+        // Calculate aggregate bandwidth across all pairs
+        double tmp = size / 1e6 * options.iterations * options.window_size * options.pairs;
+        double bw = tmp / t;  // Aggregate bandwidth
+        double msg_rate = 1e6 * options.pairs * options.iterations * options.window_size / t;
+
+        fprintf(stdout, "%-*d%*.*f", 10, size, FIELD_WIDTH, FLOAT_PRECISION, bw);
+        if (options.print_rate) {
+            fprintf(stdout, "%*.*f", FIELD_WIDTH, FLOAT_PRECISION, msg_rate);
+        }
         if (options.omb_tail_lat) {
             OMB_ITR_PRINT_STAT(omb_stat.res_arr);
         }
@@ -186,7 +178,6 @@ void print_bw(int rank, int size, double t, struct omb_stat_t omb_stat)
         fflush(stdout);
     }
 }
-
 #if MPI_VERSION >= 3
 /*Run GET with flush local */
 void run_get_with_flush_local(int rank, enum WINDOW type)
@@ -285,15 +276,10 @@ void run_get_with_flush(int rank, enum WINDOW type)
     int papi_eventset = OMB_PAPI_NULL;
     omb_graph_data_t *omb_graph_data = NULL;
     MPI_Aint disp = 0;
-    MPI_Win *wins;  // 每对进程一个窗口
+    MPI_Win my_win; 
     double *omb_lat_arr = NULL;
     struct omb_stat_t omb_stat;
-    char **r_bufs, **win_bases;
-
-    // 为每个pair分配内存
-    wins = malloc(sizeof(MPI_Win) * options.pairs);
-    r_bufs = malloc(sizeof(char*) * options.pairs);
-    win_bases = malloc(sizeof(char*) * options.pairs);
+    char *my_rbuf = NULL, *my_win_base = NULL; 
 
     int window_size = options.window_size;
     if (options.omb_tail_lat) {
@@ -304,29 +290,26 @@ void run_get_with_flush(int rank, enum WINDOW type)
     omb_papi_init(&papi_eventset);
     
     for (size = options.min_message_size; size <= options.max_message_size; size *= 2) {
+        allocate_memory_one_sided(rank, &my_rbuf, &my_win_base, 
+                                size * window_size, type, &my_win);
+
+        if (type == WIN_DYNAMIC) {
+            disp = disp_remote;
+        }
+
+        if (size > LARGE_MESSAGE_SIZE) {
+            options.iterations = options.iterations_large;
+            options.skip = options.skip_large;
+        }
+
         if (rank < options.pairs) {
-            // 发送方进程
             target = rank + options.pairs;
             
-            // 为每个目标分配内存和创建窗口
-            allocate_memory_one_sided(rank, &r_bufs[rank], &win_bases[rank], 
-                                    size * window_size, type, &wins[rank]);
-
-            if (type == WIN_DYNAMIC) {
-                disp = disp_remote;
-            }
-
-            if (size > LARGE_MESSAGE_SIZE) {
-                options.iterations = options.iterations_large;
-                options.skip = options.skip_large;
-            }
-
             omb_graph_allocate_and_get_data_buffer(&omb_graph_data, &omb_graph_op,
                                                    size, options.iterations);
-            MPI_CHECK(MPI_Barrier(omb_comm));
 
-            MPI_CHECK(MPI_Win_lock(MPI_LOCK_SHARED, target, 0, wins[rank]));
             for (i = 0; i < options.skip + options.iterations; i++) {
+                MPI_CHECK(MPI_Barrier(omb_comm));
                 if (i == options.skip) {
                     omb_papi_start(&papi_eventset);
                     t_start = MPI_Wtime();
@@ -335,13 +318,15 @@ void run_get_with_flush(int rank, enum WINDOW type)
                     t_graph_start = MPI_Wtime();
                 }
                 
+                MPI_CHECK(MPI_Win_lock(MPI_LOCK_SHARED, target, 0, my_win));
                 for (j = 0; j < window_size; j++) {
-                    MPI_CHECK(MPI_Get(r_bufs[rank] + (j * size), size, MPI_CHAR,
+                    MPI_CHECK(MPI_Get(my_rbuf + (j * size), size, MPI_CHAR,
                                     target, disp + (j * size), size, MPI_CHAR, 
-                                    wins[rank]));
+                                    my_win));
                 }
                 
-                MPI_CHECK(MPI_Win_flush(target, wins[rank]));
+                MPI_CHECK(MPI_Win_flush(target, my_win));
+                MPI_CHECK(MPI_Win_unlock(target, my_win));
                 
                 if (i >= options.skip) {
                     t_graph_end = MPI_Wtime();
@@ -358,48 +343,36 @@ void run_get_with_flush(int rank, enum WINDOW type)
                 }
             }
             t_end = MPI_Wtime();
-            MPI_CHECK(MPI_Win_unlock(target, wins[rank]));
             t = t_end - t_start;
+        } else if (rank < 2 * options.pairs) {
+            for (i = 0; i < options.skip + options.iterations; i++) {
+                MPI_CHECK(MPI_Barrier(omb_comm));
+            }
         }
 
         MPI_CHECK(MPI_Barrier(omb_comm));
 
-        // 计算总带宽
         double t_total = 0.0;
         MPI_CHECK(MPI_Reduce(&t, &t_total, 1, MPI_DOUBLE, MPI_SUM, 0, omb_comm));
         t = t_total / options.pairs;
-
+        
         omb_stat = omb_calculate_tail_lat(omb_lat_arr, rank, 1);
         omb_papi_stop_and_print(&papi_eventset, size);
-        
-        // 更新带宽计算以考虑多对
-        if (rank == 0) {
-            double tmp = size / 1e6 * options.iterations * options.window_size * options.pairs;
-            fprintf(stdout, "%-*d%*.*f", 10, size, FIELD_WIDTH, FLOAT_PRECISION,
-                    tmp / t);
-            if (options.omb_tail_lat) {
-                OMB_ITR_PRINT_STAT(omb_stat.res_arr);
-            }
-            fprintf(stdout, "\n");
-            fflush(stdout);
+        print_bw(rank, size, t, omb_stat);
+        if (options.graph && 0 == rank) {
+            omb_graph_data->avg =
+                (size / 1e6 * options.iterations * options.window_size * options.pairs) / t;
         }
-
-        // 释放资源
-        for (i = 0; i < options.pairs; i++) {
-            if (rank == i || rank == i + options.pairs) {
-                free_memory_one_sided(r_bufs[i], win_bases[i], type, wins[i], rank);
-            }
+        if (options.graph) {
+            omb_graph_plot(&omb_graph_op, benchmark_name);
         }
+        free_memory_one_sided(my_rbuf, my_win_base, type, my_win, rank);
     }
 
-    // 清理
-    free(wins);
-    free(r_bufs);
-    free(win_bases);
-    free(omb_lat_arr);
     omb_graph_combined_plot(&omb_graph_op, benchmark_name);
     omb_graph_free_data_buffers(&omb_graph_op);
     omb_papi_free(&papi_eventset);
+    free(omb_lat_arr);
 }
 
 /*Run GET with Lock_all/unlock_all */
@@ -683,16 +656,18 @@ void run_get_with_fence(int rank, enum WINDOW type)
 void run_get_with_pscw(int rank, enum WINDOW type)
 {
     double t = 0.0;
-    int destrank, size, i, j;
+    int size, i, j, target;
     double t_graph_start = 0.0, t_graph_end = 0.0;
     int papi_eventset = OMB_PAPI_NULL;
     omb_graph_data_t *omb_graph_data = NULL;
     MPI_Aint disp = 0;
-    MPI_Win win;
+    MPI_Win my_win;
     MPI_Group comm_group, group;
     MPI_CHECK(MPI_Comm_group(omb_comm, &comm_group));
     double *omb_lat_arr = NULL;
     struct omb_stat_t omb_stat;
+    char *my_rbuf = NULL, *my_win_base = NULL;
+    int *ranks = NULL;
 
     int window_size = options.window_size;
     if (options.omb_tail_lat) {
@@ -700,10 +675,11 @@ void run_get_with_pscw(int rank, enum WINDOW type)
         OMB_CHECK_NULL_AND_EXIT(omb_lat_arr, "Unable to allocate memory");
     }
     omb_papi_init(&papi_eventset);
+    
     for (size = options.min_message_size; size <= options.max_message_size;
          size = (size ? size * 2 : 1)) {
-        allocate_memory_one_sided(rank, &rbuf, &win_base, size * window_size,
-                                  type, &win);
+        allocate_memory_one_sided(rank, &my_rbuf, &my_win_base, size * window_size,
+                                  type, &my_win);
 
 #if MPI_VERSION >= 3
         if (type == WIN_DYNAMIC) {
@@ -720,11 +696,14 @@ void run_get_with_pscw(int rank, enum WINDOW type)
                                                size, options.iterations);
         MPI_CHECK(MPI_Barrier(omb_comm));
 
-        if (rank == 0) {
-            destrank = 1;
-            MPI_CHECK(MPI_Group_incl(comm_group, 1, &destrank, &group));
+        if (rank < options.pairs) {
+            target = rank + options.pairs;
+            ranks = malloc(sizeof(int));
+            ranks[0] = target;
+            MPI_CHECK(MPI_Group_incl(comm_group, 1, ranks, &group));
+            
             for (i = 0; i < options.skip + options.iterations; i++) {
-                MPI_CHECK(MPI_Win_start(group, 0, win));
+                MPI_CHECK(MPI_Barrier(omb_comm));
                 if (i == options.skip) {
                     omb_papi_start(&papi_eventset);
                     t_start = MPI_Wtime();
@@ -732,11 +711,12 @@ void run_get_with_pscw(int rank, enum WINDOW type)
                 if (i >= options.skip) {
                     t_graph_start = MPI_Wtime();
                 }
+                MPI_CHECK(MPI_Win_start(group, 0, my_win));
                 for (j = 0; j < window_size; j++) {
-                    MPI_CHECK(MPI_Get(rbuf + j * size, size, MPI_CHAR, 1,
-                                      disp + (j * size), size, MPI_CHAR, win));
+                    MPI_CHECK(MPI_Get(my_rbuf + j * size, size, MPI_CHAR, target,
+                                      disp + (j * size), size, MPI_CHAR, my_win));
                 }
-                MPI_CHECK(MPI_Win_complete(win));
+                MPI_CHECK(MPI_Win_complete(my_win));
                 if (i >= options.skip) {
                     t_graph_end = MPI_Wtime();
                     if (options.omb_tail_lat) {
@@ -753,33 +733,43 @@ void run_get_with_pscw(int rank, enum WINDOW type)
             }
             t_end = MPI_Wtime();
             t = t_end - t_start;
-        } else {
-            destrank = 0;
-            MPI_CHECK(MPI_Group_incl(comm_group, 1, &destrank, &group));
+            free(ranks);
+        } else if (rank < 2 * options.pairs) {
+            target = rank - options.pairs;
+            ranks = malloc(sizeof(int));
+            ranks[0] = target;
+            MPI_CHECK(MPI_Group_incl(comm_group, 1, ranks, &group));
+            
             for (i = 0; i < options.skip + options.iterations; i++) {
+                MPI_CHECK(MPI_Barrier(omb_comm));
                 if (i == options.skip) {
                     omb_papi_start(&papi_eventset);
                 }
-                MPI_CHECK(MPI_Win_post(group, 0, win));
-                MPI_CHECK(MPI_Win_wait(win));
+                MPI_CHECK(MPI_Win_post(group, 0, my_win));
+                MPI_CHECK(MPI_Win_wait(my_win));
             }
+            free(ranks);
         }
 
         MPI_CHECK(MPI_Barrier(omb_comm));
+
+        double t_total = 0.0;
+        MPI_CHECK(MPI_Reduce(&t, &t_total, 1, MPI_DOUBLE, MPI_SUM, 0, omb_comm));
+        t = t_total / options.pairs;
 
         omb_stat = omb_calculate_tail_lat(omb_lat_arr, rank, 1);
         omb_papi_stop_and_print(&papi_eventset, size);
         print_bw(rank, size, t, omb_stat);
         if (options.graph && 0 == rank) {
             omb_graph_data->avg =
-                (size / 1e6 * options.iterations * options.window_size) / t;
+                (size / 1e6 * options.iterations * options.window_size * options.pairs) / t;
         }
         if (options.graph) {
             omb_graph_plot(&omb_graph_op, benchmark_name);
         }
         MPI_CHECK(MPI_Group_free(&group));
 
-        free_memory_one_sided(rbuf, win_base, type, win, rank);
+        free_memory_one_sided(my_rbuf, my_win_base, type, my_win, rank);
     }
     omb_graph_combined_plot(&omb_graph_op, benchmark_name);
     omb_graph_free_data_buffers(&omb_graph_op);
