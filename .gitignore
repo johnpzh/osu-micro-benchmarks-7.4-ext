@@ -1,0 +1,13 @@
+# IDE
+.idea/
+
+# CLAUDE
+CLAUDE.md
+
+# Build
+build/
+cmake-build-*/
+
+# Output
+output.*
+output_*
