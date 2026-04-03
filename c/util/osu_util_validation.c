@@ -47,7 +47,7 @@ static int set_hmem_buffer(void *dst, void *src, size_t size)
 {
     char buf_type = get_rank_buffer_type();
 
-    if (buf_type == 'H' || options.accel == NONE) {
+    if (buf_type == 'H' || options.accel == NONE || options.accel == CXL) {
         memcpy(dst, src, size);
         return 0;
     }
@@ -72,7 +72,8 @@ static int set_hmem_buffer(void *dst, void *src, size_t size)
 
 static int get_hmem_buffer(void *dst, void *src, size_t size)
 {
-    if (rank_buffer_type == 'H' || options.accel == NONE) {
+    if (rank_buffer_type == 'H' || options.accel == NONE ||
+        options.accel == CXL) {
         memcpy(dst, src, size);
         return 0;
     }

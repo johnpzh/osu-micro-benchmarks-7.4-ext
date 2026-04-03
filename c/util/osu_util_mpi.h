@@ -130,6 +130,10 @@ struct omb_buffer_sizes_t {
 };
 int allocate_memory_coll(void **buffer, size_t size, enum accel_type type);
 void free_buffer(void *buffer, enum accel_type type);
+#ifdef _ENABLE_CXL_
+typedef struct FamImpl *rapid_handle;
+extern rapid_handle omb_rapid_handle;
+#endif
 void set_buffer(void *buffer, enum accel_type type, int data, size_t size);
 void set_buffer_pt2pt(void *buffer, int rank, enum accel_type type, int data,
                       size_t size);

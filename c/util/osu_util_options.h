@@ -215,8 +215,8 @@
              "~~(default 536870912)"},                                         \
             {'d', "TYPE - use accelerator device buffers, which can be of "    \
                   "TYPE `cuda',"                                               \
-                  "~~`managed', `openacc', or `rocm' (uses standard host "     \
-                  "buffers if not specified)"},                                \
+                  "~~`managed', `openacc', `rocm', or `cxl' (uses standard "   \
+                  "host buffers if not specified)"},                                \
             {'r', "TARGET - set the compute target for dummy computation"      \
                   "~~set TARGET to cpu (default) to execute"                   \
                   "~~on CPU only, set to gpu for executing kernel"             \

@@ -135,6 +135,20 @@ AC_ARG_WITH([rocm],
                       LDFLAGS="-L$with_rocm/lib64 -Wl,-rpath=$with_rocm/lib64 -L$with_rocm/lib -Wl,-rpath=$with_rocm/lib -lamdhip64 $LDFLAGS"])
             ])
 
+AC_ARG_ENABLE([cxl],
+              [AS_HELP_STRING([--enable-cxl],
+                              [Enable CXL/RAPID benchmarks])],
+              [],
+              [enable_cxl=no])
+
+AC_ARG_WITH([cxl],
+            [AS_HELP_STRING([--with-cxl=@<:@RAPID installation path@:>@],
+                            [Provide path to RAPID installation])],
+            [AS_CASE([$with_cxl],
+                     [yes|no], [],
+                     [CPPFLAGS="-I$with_cxl/include $CPPFLAGS"
+                      LDFLAGS="-L$with_cxl/lib64 -Wl,-rpath=$with_cxl/lib64 -L$with_cxl/lib -Wl,-rpath=$with_cxl/lib $LDFLAGS"])])
+
 AC_ARG_ENABLE([rcclomb],
          [AS_HELP_STRING([--enable-rcclomb],
              [Enable RCCL benchmarks (default is no). Specify
@@ -268,6 +282,14 @@ AS_IF([test "x$enable_rocm" = xyes], [
        AC_DEFINE([_ENABLE_ROCM_], [1], [Enable ROCm])
        ])
 
+AS_IF([test "x$enable_cxl" = xyes], [
+       AC_CHECK_HEADERS([rapid.h], [],
+                        [AC_MSG_ERROR([cannot include rapid.h])])
+       AC_SEARCH_LIBS([rapid_initialize], [rapid], [],
+                      [AC_MSG_ERROR([cannot link with -lrapid])])
+       AC_DEFINE([_ENABLE_CXL_], [1], [Enable CXL/RAPID])
+       ])
+
 AS_IF([test "x$mpi4_library" = xtrue], [
        AC_CHECK_FUNC([MPI_Session_init], [], AC_MSG_ERROR([MPI does not support MPI-4.]))
        AC_DEFINE([_ENABLE_MPI4_], [1], [Enable MPI4 support])
@@ -318,6 +340,7 @@ AM_CONDITIONAL([NCCL_PT2PT], [test x$nccl_pt2pt = xtrue])
 AM_CONDITIONAL([CUDA_KERNELS], [test x$build_cuda_kernels = xyes])
 AM_CONDITIONAL([OPENACC], [test x$enable_openacc = xyes])
 AM_CONDITIONAL([ROCM], [test x$enable_rocm = xyes])
+AM_CONDITIONAL([CXL], [test x$enable_cxl = xyes])
 AM_CONDITIONAL([RCCL], [test x$enable_rcclomb = xyes])
 AM_CONDITIONAL([RCCL_PT2PT], [test x$rccl_pt2pt = xtrue])
 AM_CONDITIONAL([OSHM], [test x$oshm_library = xtrue])

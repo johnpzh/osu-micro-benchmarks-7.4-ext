@@ -10,6 +10,14 @@
 
 #include "osu_util_mpi.h"
 
+#ifdef _ENABLE_CXL_
+#include <rapid.h>
+rapid_handle omb_rapid_handle = NULL;
+#endif
+
+static int omb_host_alloc(void **buf, size_t alignment, size_t size);
+static void omb_host_free(void *buf);
+
 MPI_Request request[MAX_REQ_NUM];
 MPI_Status reqstat[MAX_REQ_NUM];
 MPI_Request send_request[MAX_REQ_NUM];
@@ -96,6 +104,11 @@ void set_device_memory(void *ptr, int data, size_t size)
             ROCM_CHECK(hipMemset(ptr, data, size));
             break;
 #endif
+#ifdef _ENABLE_CXL_
+        case CXL:
+            memset(ptr, data, size);
+            break;
+#endif
         default:
             break;
     }
@@ -121,6 +134,9 @@ int free_device_buffer(void *buf)
             ROCM_CHECK(hipFree(buf));
             break;
 #endif
+        case CXL:
+            omb_host_free(buf);
+            break;
         default:
             /* unknown device */
             return 1;
@@ -353,6 +369,9 @@ void print_header_one_sided(int rank, enum WINDOW win, enum SYNC sync,
             case ROCM:
                 printf(benchmark_header, "-ROCM");
                 break;
+            case CXL:
+                printf(benchmark_header, "-CXL");
+                break;
             default:
                 printf(benchmark_header, "");
                 break;
@@ -428,6 +447,9 @@ void print_version_message(int rank)
         case ROCM:
             printf(benchmark_header, "-ROCM");
             break;
+        case CXL:
+            printf(benchmark_header, "-CXL");
+            break;
         default:
             printf(benchmark_header, "");
             break;
@@ -456,6 +478,9 @@ void print_preamble_nbc(int rank)
             break;
         case ROCM:
             printf(benchmark_header, "-ROCM");
+            break;
+        case CXL:
+            printf(benchmark_header, "-CXL");
             break;
         default:
             printf(benchmark_header, "");
@@ -555,6 +580,9 @@ void print_preamble(int rank)
             break;
         case ROCM:
             printf(benchmark_header, "-ROCM");
+            break;
+        case CXL:
+            printf(benchmark_header, "-CXL");
             break;
         default:
             printf(benchmark_header, "");
@@ -1104,6 +1132,9 @@ void set_buffer(void *buffer, enum accel_type type, int data, size_t size)
             ROCM_CHECK(hipMemset(buffer, data, size));
 #endif
             break;
+        case CXL:
+            memset(buffer, data, size);
+            break;
         default:
             break;
     }
@@ -1354,6 +1385,7 @@ void set_buffer_dtype_reduce(void *buffer, int is_send_buf, size_t size,
     }
     switch (type) {
         case NONE:
+        case CXL:
             memcpy((void *)buffer, (void *)temp_buffer, size);
             break;
         case CUDA:
@@ -1447,6 +1479,7 @@ void set_buffer_dtype(void *buffer, int is_send_buf, size_t size, int rank,
     }
     switch (type) {
         case NONE:
+        case CXL:
             memcpy((void *)buffer, (void *)temp_buffer, buffer_size);
             break;
         case CUDA:
@@ -1886,6 +1919,7 @@ void set_buffer_nhbr_validation(void *s_buf, void *r_buf, int indegree,
     }
     switch (type) {
         case NONE:
+        case CXL:
             memcpy((void *)s_buf, (void *)temp_s_buf, size * send_numprocs);
             memcpy((void *)r_buf, (void *)temp_r_buf, size * recv_numprocs);
             break;
@@ -1948,6 +1982,7 @@ int omb_validate_neighborhood_col(MPI_Comm comm, char *buffer, int indegree,
     }
     switch (type) {
         case NONE:
+        case CXL:
             memcpy((void *)temp_r_buf, (void *)buffer, size * recv_numprocs);
             break;
         case CUDA:
@@ -2032,6 +2067,7 @@ int validate_reduce_scatter(void *buffer, size_t size, int *recvcounts,
 
     switch (type) {
         case NONE:
+        case CXL:
             memcpy((void *)temp_buffer, (void *)buffer, size);
             break;
 #ifdef _ENABLE_CUDA_
@@ -2098,6 +2134,7 @@ int validate_reduction(void *buffer, size_t size, int iter, int num_procs,
 
     switch (type) {
         case NONE:
+        case CXL:
             memcpy((void *)temp_buffer, (void *)buffer, size);
             break;
 #ifdef _ENABLE_CUDA_
@@ -2149,6 +2186,7 @@ int validate_collective(void *buffer, size_t size, int value1, int value2,
 
     switch (type) {
         case NONE:
+        case CXL:
             memcpy((void *)temp_buffer, (void *)buffer, size * value2);
             break;
 #ifdef _ENABLE_CUDA_
@@ -2263,6 +2301,47 @@ void validation_log(void *buffer, void *expected_buffer, size_t size,
     fclose(log_file_fp);
 }
 
+static int omb_host_alloc(void **buf, size_t alignment, size_t size)
+{
+#ifdef _ENABLE_CXL_
+    if (CXL == options.accel) {
+        int ret =
+            rapid_posix_memalign(omb_rapid_handle, buf, alignment, size);
+        if (0 == ret) {
+            size_t dev_id = 0;
+            fam_status_t status =
+                rapid_get_dev_id(omb_rapid_handle, *buf, &dev_id);
+            if (FAM_NO_ERROR == status) {
+                fprintf(stdout,
+                        "# CXL/RAPID: allocated %zu bytes on device %zu "
+                        "at %p\n",
+                        size, dev_id, *buf);
+            }
+        }
+        return ret;
+    }
+#endif
+    {
+        int ret = posix_memalign(buf, alignment, size);
+        if (0 == ret) {
+            fprintf(stdout,
+                    "# HOST/POSIX_MEMALIGN: allocated %zu bytes at %p\n", size, *buf);
+        }
+        return ret;
+    }
+}
+
+static void omb_host_free(void *buf)
+{
+#ifdef _ENABLE_CXL_
+    if (CXL == options.accel) {
+        rapid_free(omb_rapid_handle, buf);
+        return;
+    }
+#endif
+    free(buf);
+}
+
 int allocate_memory_coll(void **buffer, size_t size, enum accel_type type)
 {
     if (options.target == CPU || options.target == BOTH) {
@@ -2273,7 +2352,8 @@ int allocate_memory_coll(void **buffer, size_t size, enum accel_type type)
 
     switch (type) {
         case NONE:
-            return posix_memalign(buffer, alignment, size);
+        case CXL:
+            return omb_host_alloc(buffer, alignment, size);
 #ifdef _ENABLE_CUDA_
         case CUDA:
             CUDA_CHECK(cudaMalloc(buffer, size));
@@ -2437,13 +2517,13 @@ int allocate_memory_pt2pt_mul(char **sbuf, char **rbuf, int rank, int pairs)
                 return 1;
             }
         } else {
-            if (posix_memalign((void **)sbuf, align_size,
+            if (omb_host_alloc((void **)sbuf, align_size,
                                options.max_message_size)) {
                 fprintf(stderr, "Error allocating host memory\n");
                 return 1;
             }
 
-            if (posix_memalign((void **)rbuf, align_size,
+            if (omb_host_alloc((void **)rbuf, align_size,
                                options.max_message_size)) {
                 fprintf(stderr, "Error allocating host memory\n");
                 return 1;
@@ -2474,13 +2554,13 @@ int allocate_memory_pt2pt_mul(char **sbuf, char **rbuf, int rank, int pairs)
                 return 1;
             }
         } else {
-            if (posix_memalign((void **)sbuf, align_size,
+            if (omb_host_alloc((void **)sbuf, align_size,
                                options.max_message_size)) {
                 fprintf(stderr, "Error allocating host memory\n");
                 return 1;
             }
 
-            if (posix_memalign((void **)rbuf, align_size,
+            if (omb_host_alloc((void **)rbuf, align_size,
                                options.max_message_size)) {
                 fprintf(stderr, "Error allocating host memory\n");
                 return 1;
@@ -2527,12 +2607,12 @@ int allocate_memory_pt2pt_mul_size(char **sbuf, char **rbuf, int rank,
                 return 1;
             }
         } else {
-            if (posix_memalign((void **)sbuf, align_size, size)) {
+            if (omb_host_alloc((void **)sbuf, align_size, size)) {
                 fprintf(stderr, "Error allocating host memory\n");
                 return 1;
             }
 
-            if (posix_memalign((void **)rbuf, align_size, size)) {
+            if (omb_host_alloc((void **)rbuf, align_size, size)) {
                 fprintf(stderr, "Error allocating host memory\n");
                 return 1;
             }
@@ -2562,12 +2642,12 @@ int allocate_memory_pt2pt_mul_size(char **sbuf, char **rbuf, int rank,
                 return 1;
             }
         } else {
-            if (posix_memalign((void **)sbuf, align_size, size)) {
+            if (omb_host_alloc((void **)sbuf, align_size, size)) {
                 fprintf(stderr, "Error allocating host memory\n");
                 return 1;
             }
 
-            if (posix_memalign((void **)rbuf, align_size, size)) {
+            if (omb_host_alloc((void **)rbuf, align_size, size)) {
                 fprintf(stderr, "Error allocating host memory\n");
                 return 1;
             }
@@ -2606,13 +2686,13 @@ int allocate_memory_pt2pt(char **sbuf, char **rbuf, int rank)
                     return 1;
                 }
             } else {
-                if (posix_memalign((void **)sbuf, align_size,
+                if (omb_host_alloc((void **)sbuf, align_size,
                                    options.max_message_size)) {
                     fprintf(stderr, "Error allocating host memory\n");
                     return 1;
                 }
 
-                if (posix_memalign((void **)rbuf, align_size,
+                if (omb_host_alloc((void **)rbuf, align_size,
                                    options.max_message_size)) {
                     fprintf(stderr, "Error allocating host memory\n");
                     return 1;
@@ -2641,13 +2721,13 @@ int allocate_memory_pt2pt(char **sbuf, char **rbuf, int rank)
                     return 1;
                 }
             } else {
-                if (posix_memalign((void **)sbuf, align_size,
+                if (omb_host_alloc((void **)sbuf, align_size,
                                    options.max_message_size)) {
                     fprintf(stderr, "Error allocating host memory\n");
                     return 1;
                 }
 
-                if (posix_memalign((void **)rbuf, align_size,
+                if (omb_host_alloc((void **)rbuf, align_size,
                                    options.max_message_size)) {
                     fprintf(stderr, "Error allocating host memory\n");
                     return 1;
@@ -2694,12 +2774,12 @@ int allocate_memory_pt2pt_size(char **sbuf, char **rbuf, int rank,
                     return 1;
                 }
             } else {
-                if (posix_memalign((void **)sbuf, align_size, size)) {
+                if (omb_host_alloc((void **)sbuf, align_size, size)) {
                     fprintf(stderr, "Error allocating host memory\n");
                     return 1;
                 }
 
-                if (posix_memalign((void **)rbuf, align_size, size)) {
+                if (omb_host_alloc((void **)rbuf, align_size, size)) {
                     fprintf(stderr, "Error allocating host memory\n");
                     return 1;
                 }
@@ -2727,12 +2807,12 @@ int allocate_memory_pt2pt_size(char **sbuf, char **rbuf, int rank,
                     return 1;
                 }
             } else {
-                if (posix_memalign((void **)sbuf, align_size, size)) {
+                if (omb_host_alloc((void **)sbuf, align_size, size)) {
                     fprintf(stderr, "Error allocating host memory\n");
                     return 1;
                 }
 
-                if (posix_memalign((void **)rbuf, align_size, size)) {
+                if (omb_host_alloc((void **)rbuf, align_size, size)) {
                     fprintf(stderr, "Error allocating host memory\n");
                     return 1;
                 }
@@ -2768,10 +2848,10 @@ void allocate_memory_one_sided(int rank, char **user_buf, char **win_base,
                 allocate_device_buffer_one_sided(win_base, size, options.src));
             set_device_memory(*win_base, 'a', size);
         } else {
-            CHECK(posix_memalign((void **)user_buf, page_size, size));
+            CHECK(omb_host_alloc((void **)user_buf, page_size, size));
             memset(*user_buf, 'a', size);
             if (type != WIN_ALLOCATE || !purehost) {
-                CHECK(posix_memalign((void **)win_base, page_size, size));
+                CHECK(omb_host_alloc((void **)win_base, page_size, size));
                 memset(*win_base, 'a', size);
             }
         }
@@ -2786,10 +2866,10 @@ void allocate_memory_one_sided(int rank, char **user_buf, char **win_base,
                 allocate_device_buffer_one_sided(win_base, size, options.dst));
             set_device_memory(*win_base, 'a', size);
         } else {
-            CHECK(posix_memalign((void **)user_buf, page_size, size));
+            CHECK(omb_host_alloc((void **)user_buf, page_size, size));
             memset(*user_buf, 'a', size);
             if (type != WIN_ALLOCATE || !purehost) {
-                CHECK(posix_memalign((void **)win_base, page_size, size));
+                CHECK(omb_host_alloc((void **)win_base, page_size, size));
                 memset(*win_base, 'a', size);
             }
         }
@@ -2919,7 +2999,8 @@ void free_buffer(void *buffer, enum accel_type type)
 {
     switch (type) {
         case NONE:
-            free(buffer);
+        case CXL:
+            omb_host_free(buffer);
             break;
         case MANAGED:
         case CUDA:
@@ -3046,12 +3127,16 @@ int init_accel(void)
             ROCM_CHECK(hipSetDevice(dev_id));
             break;
 #endif
+#ifdef _ENABLE_CXL_
+        case CXL:
+            omb_rapid_handle = rapid_initialize();
+            break;
+#endif
         default:
             fprintf(stderr,
-                    "Invalid device type, should be cuda, openacc, or rocm. "
-                    "Check configure time options to verify that support for "
-                    "chosen "
-                    "device type is enabled.\n");
+                    "Invalid device type, should be cuda, openacc, rocm, or "
+                    "cxl. Check configure time options to verify that support "
+                    "for chosen device type is enabled.\n");
             return 1;
     }
 
@@ -3087,8 +3172,17 @@ int cleanup_accel(void)
             ROCM_CHECK(hipDeviceReset());
             break;
 #endif
+#ifdef _ENABLE_CXL_
+        case CXL:
+            if (omb_rapid_handle != NULL) {
+                rapid_finalize(omb_rapid_handle);
+                omb_rapid_handle = NULL;
+            }
+            break;
+#endif
         default:
-            fprintf(stderr, "Invalid accel type, should be cuda or openacc\n");
+            fprintf(stderr, "Invalid accel type, should be cuda, openacc, "
+                            "rocm, or cxl\n");
             return 1;
     }
 
@@ -3116,10 +3210,10 @@ void free_memory(void *sbuf, void *rbuf, int rank)
                 free_device_buffer(rbuf);
             } else {
                 if (sbuf) {
-                    free(sbuf);
+                    omb_host_free(sbuf);
                 }
                 if (rbuf) {
-                    free(rbuf);
+                    omb_host_free(rbuf);
                 }
             }
             break;
@@ -3129,10 +3223,10 @@ void free_memory(void *sbuf, void *rbuf, int rank)
                 free_device_buffer(rbuf);
             } else {
                 if (sbuf) {
-                    free(sbuf);
+                    omb_host_free(sbuf);
                 }
                 if (rbuf) {
-                    free(rbuf);
+                    omb_host_free(rbuf);
                 }
             }
             break;
@@ -3146,16 +3240,16 @@ void free_memory_pt2pt_mul(void *sbuf, void *rbuf, int rank, int pairs)
             free_device_buffer(sbuf);
             free_device_buffer(rbuf);
         } else {
-            free(sbuf);
-            free(rbuf);
+            omb_host_free(sbuf);
+            omb_host_free(rbuf);
         }
     } else {
         if ('D' == options.dst || 'M' == options.dst) {
             free_device_buffer(sbuf);
             free_device_buffer(rbuf);
         } else {
-            free(sbuf);
-            free(rbuf);
+            omb_host_free(sbuf);
+            omb_host_free(rbuf);
         }
     }
 }
@@ -3191,6 +3285,7 @@ void omb_scatter_offset_copy(void *buf, int root_rank, size_t size)
 {
     switch (options.accel) {
         case NONE:
+        case CXL:
             memcpy(buf, buf + root_rank * size, size);
             break;
         case CUDA:
@@ -3434,14 +3529,14 @@ void allocate_atomic_memory(int rank, char **sbuf, char **tbuf, char **cbuf,
                 set_device_memory(*cbuf, 'a', size);
             }
         } else {
-            CHECK(posix_memalign((void **)sbuf, page_size, size));
+            CHECK(omb_host_alloc((void **)sbuf, page_size, size));
             memset(*sbuf, 'a', size);
-            CHECK(posix_memalign((void **)win_base, page_size, size));
+            CHECK(omb_host_alloc((void **)win_base, page_size, size));
             memset(*win_base, 'b', size);
-            CHECK(posix_memalign((void **)tbuf, page_size, size));
+            CHECK(omb_host_alloc((void **)tbuf, page_size, size));
             memset(*tbuf, 'c', size);
             if (cbuf != NULL) {
-                CHECK(posix_memalign((void **)cbuf, page_size, size));
+                CHECK(omb_host_alloc((void **)cbuf, page_size, size));
                 memset(*cbuf, 'a', size);
             }
         }
@@ -3460,14 +3555,14 @@ void allocate_atomic_memory(int rank, char **sbuf, char **tbuf, char **cbuf,
                 set_device_memory(*cbuf, 'a', size);
             }
         } else {
-            CHECK(posix_memalign((void **)sbuf, page_size, size));
+            CHECK(omb_host_alloc((void **)sbuf, page_size, size));
             memset(*sbuf, 'a', size);
-            CHECK(posix_memalign((void **)win_base, page_size, size));
+            CHECK(omb_host_alloc((void **)win_base, page_size, size));
             memset(*win_base, 'b', size);
-            CHECK(posix_memalign((void **)tbuf, page_size, size));
+            CHECK(omb_host_alloc((void **)tbuf, page_size, size));
             memset(*tbuf, 'c', size);
             if (cbuf != NULL) {
-                CHECK(posix_memalign((void **)cbuf, page_size, size));
+                CHECK(omb_host_alloc((void **)cbuf, page_size, size));
                 memset(*cbuf, 'a', size);
             }
         }
@@ -3530,13 +3625,13 @@ void free_atomic_memory(void *sbuf, void *win_baseptr, void *tbuf, void *cbuf,
                 free_device_buffer(cbuf);
             }
         } else {
-            free(sbuf);
-            if (NULL == win_baseptr) {
-                free(win_baseptr);
+            omb_host_free(sbuf);
+            if (NULL != win_baseptr) {
+                omb_host_free(win_baseptr);
             }
-            free(tbuf);
+            omb_host_free(tbuf);
             if (NULL != cbuf) {
-                free(cbuf);
+                omb_host_free(cbuf);
             }
         }
     } else {
@@ -3548,13 +3643,13 @@ void free_atomic_memory(void *sbuf, void *win_baseptr, void *tbuf, void *cbuf,
                 free_device_buffer(cbuf);
             }
         } else {
-            free(sbuf);
-            if (NULL == win_baseptr) {
-                free(win_baseptr);
+            omb_host_free(sbuf);
+            if (NULL != win_baseptr) {
+                omb_host_free(win_baseptr);
             }
-            free(tbuf);
+            omb_host_free(tbuf);
             if (NULL != cbuf) {
-                free(cbuf);
+                omb_host_free(cbuf);
             }
         }
     }

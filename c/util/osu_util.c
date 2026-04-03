@@ -35,6 +35,7 @@ void print_header(int rank, int full)
                     case CUDA:
                     case OPENACC:
                     case ROCM:
+                    case CXL:
                         fprintf(
                             stdout,
                             "# Send Buffer on %s and Receive Buffer on %s\n",
@@ -408,7 +409,8 @@ void set_benchmark_name(const char *name) { benchmark_name = name; }
 
 void enable_accel_support(void)
 {
-    accel_enabled = ((CUDA_ENABLED || OPENACC_ENABLED || ROCM_ENABLED) &&
+    accel_enabled = ((CUDA_ENABLED || OPENACC_ENABLED || ROCM_ENABLED ||
+                      CXL_ENABLED) &&
                      !(options.subtype == LAT_MT || options.subtype == LAT_MP));
 }
 
@@ -900,6 +902,16 @@ int process_options(int argc, char *argv[])
                         bad_usage.message =
                             "ROCm Support Not Enabled\n"
                             "Please recompile benchmark with ROCm support";
+                        bad_usage.optarg = optarg;
+                        return PO_BAD_USAGE;
+                    }
+                } else if (0 == strncasecmp(optarg, "cxl", 10)) {
+                    if (CXL_ENABLED) {
+                        options.accel = CXL;
+                    } else {
+                        bad_usage.message =
+                            "CXL Support Not Enabled\n"
+                            "Please recompile benchmark with CXL support";
                         bad_usage.optarg = optarg;
                         return PO_BAD_USAGE;
                     }

@@ -78,6 +78,12 @@
 #define ROCM_ENABLED 0
 #endif
 
+#ifdef _ENABLE_CXL_
+#define CXL_ENABLED 1
+#else
+#define CXL_ENABLED 0
+#endif
+
 #ifndef BENCHMARK
 #define BENCHMARK "MPI%s BENCHMARK NAME UNSET"
 #endif
@@ -220,7 +226,7 @@ enum po_ret_type {
     PO_OKAY,
 };
 
-enum accel_type { NONE, CUDA, OPENACC, MANAGED, ROCM };
+enum accel_type { NONE, CUDA, OPENACC, MANAGED, ROCM, CXL };
 
 enum target_type { CPU, GPU, BOTH };
 
